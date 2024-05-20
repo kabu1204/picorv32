@@ -90,9 +90,9 @@ module picorv32 #(
 	input clk, resetn,
 	output reg trap,
 
-	output reg        mem_valid,
+	output reg        mem_valid,	// reading memory. (set this to 1 to tell external memory bank to read memory)
 	output reg        mem_instr,
-	input             mem_ready,
+	input             mem_ready,	// data ready in mem_rdata
 
 	output reg [31:0] mem_addr,
 	output reg [31:0] mem_wdata,
@@ -352,7 +352,7 @@ module picorv32 #(
 	reg [1:0] mem_wordsize;
 	reg [31:0] mem_rdata_word;
 	reg [31:0] mem_rdata_q;
-	reg mem_do_prefetch;
+	reg mem_do_prefetch;	// prefetch instruction
 	reg mem_do_rinst;
 	reg mem_do_rdata;
 	reg mem_do_wdata;
@@ -370,6 +370,7 @@ module picorv32 #(
 	wire [31:0] mem_rdata_latched;
 
 	wire mem_la_use_prefetched_high_word = COMPRESSED_ISA && mem_la_firstword && prefetched_high_word && !clear_prefetched_high_word;
+	// mem_xfer: mem_valid (reading memory) AND mem_ready (data is ready)
 	assign mem_xfer = (mem_valid && mem_ready) || (mem_la_use_prefetched_high_word && mem_do_rinst);
 
 	wire mem_busy = |{mem_do_prefetch, mem_do_rinst, mem_do_rdata, mem_do_wdata};
@@ -398,6 +399,7 @@ module picorv32 #(
 		end
 	end
 
+	// do some conversion according to mem_wordsize (lw/sw, lh/sh, lb/sb)
 	always @* begin
 		(* full_case *)
 		case (mem_wordsize)
@@ -428,6 +430,7 @@ module picorv32 #(
 	end
 
 	always @(posedge clk) begin
+		// transfer data to mem_rdata_q
 		if (mem_xfer) begin
 			mem_rdata_q <= COMPRESSED_ISA ? mem_rdata_latched : mem_rdata;
 			next_insn_opcode <= COMPRESSED_ISA ? mem_rdata_latched : mem_rdata;
@@ -543,25 +546,27 @@ module picorv32 #(
 		end
 	end
 
+	// some assertions
 	always @(posedge clk) begin
 		if (resetn && !trap) begin
 			if (mem_do_prefetch || mem_do_rinst || mem_do_rdata)
-				`assert(!mem_do_wdata);
+				`assert(!mem_do_wdata);	// no writeback during read
 
 			if (mem_do_prefetch || mem_do_rinst)
-				`assert(!mem_do_rdata);
+				`assert(!mem_do_rdata); // no data read during instruction fetch
 
 			if (mem_do_rdata)
-				`assert(!mem_do_prefetch && !mem_do_rinst);
+				`assert(!mem_do_prefetch && !mem_do_rinst); // no instruction fetch during data read
 
 			if (mem_do_wdata)
-				`assert(!(mem_do_prefetch || mem_do_rinst || mem_do_rdata));
+				`assert(!(mem_do_prefetch || mem_do_rinst || mem_do_rdata)); // no read during writeback
 
 			if (mem_state == 2 || mem_state == 3)
-				`assert(mem_valid || mem_do_prefetch);
+				`assert(mem_valid || mem_do_prefetch); // writeback only if valid
 		end
 	end
 
+	// memory controller state machine
 	always @(posedge clk) begin
 		if (!resetn || trap) begin
 			if (!resetn)
@@ -592,11 +597,13 @@ module picorv32 #(
 						mem_state <= 2;
 					end
 				end
-				1: begin
+				1: begin	// mem_state == 1, reading memory. (we need this maybe memory cannot be ready in 1 cycle ?)
 					`assert(mem_wstrb == 0);
 					`assert(mem_do_prefetch || mem_do_rinst || mem_do_rdata);
 					`assert(mem_valid == !mem_la_use_prefetched_high_word);
 					`assert(mem_instr == (mem_do_prefetch || mem_do_rinst));
+					// mem_xfer means copy external mem_rdata to internal mem_rdata_q
+					// if !mem_xfer, the data is not ready, so keep the state
 					if (mem_xfer) begin
 						if (COMPRESSED_ISA && mem_la_read) begin
 							mem_valid <= 1;
@@ -604,6 +611,7 @@ module picorv32 #(
 							if (!mem_la_use_prefetched_high_word)
 								mem_16bit_buffer <= mem_rdata[31:16];
 						end else begin
+							// transfer done
 							mem_valid <= 0;
 							mem_la_secondword <= 0;
 							if (COMPRESSED_ISA && !mem_do_rdata) begin
@@ -614,7 +622,7 @@ module picorv32 #(
 									prefetched_high_word <= 0;
 								end
 							end
-							mem_state <= mem_do_rinst || mem_do_rdata ? 0 : 3;
+							mem_state <= mem_do_rinst || mem_do_rdata ? 0 : 3;	// prefetch or data read done
 						end
 					end
 				end
@@ -789,6 +797,7 @@ module picorv32 #(
 		else if (launch_next_insn)
 			dbg_valid_insn <= 1;
 
+		// IR (?)
 		if (decoder_trigger_q) begin
 			cached_ascii_instr <= new_ascii_instr;
 			cached_insn_imm <= decoded_imm;
@@ -806,6 +815,7 @@ module picorv32 #(
 		end
 	end
 
+	// debug
 	always @* begin
 		dbg_ascii_instr = q_ascii_instr;
 		dbg_insn_imm = q_insn_imm;
@@ -874,15 +884,20 @@ module picorv32 #(
 			is_beq_bne_blt_bge_bltu_bgeu <= mem_rdata_latched[6:0] == 7'b1100011;
 			is_lb_lh_lw_lbu_lhu          <= mem_rdata_latched[6:0] == 7'b0000011;
 			is_sb_sh_sw                  <= mem_rdata_latched[6:0] == 7'b0100011;
+			// OP-IMM, related to integer computational instructions
 			is_alu_reg_imm               <= mem_rdata_latched[6:0] == 7'b0010011;
+			// OP, related to integer computational instructions
 			is_alu_reg_reg               <= mem_rdata_latched[6:0] == 7'b0110011;
 
+			// J-type intermediate
 			{ decoded_imm_j[31:20], decoded_imm_j[10:1], decoded_imm_j[11], decoded_imm_j[19:12], decoded_imm_j[0] } <= $signed({mem_rdata_latched[31:12], 1'b0});
 
+			// Registers
 			decoded_rd <= mem_rdata_latched[11:7];
 			decoded_rs1 <= mem_rdata_latched[19:15];
 			decoded_rs2 <= mem_rdata_latched[24:20];
 
+			// IRQ related
 			if (mem_rdata_latched[6:0] == 7'b0001011 && mem_rdata_latched[31:25] == 7'b0000000 && ENABLE_IRQ && ENABLE_IRQ_QREGS)
 				decoded_rs1[regindex_bits-1] <= 1; // instr_getq
 
@@ -1037,6 +1052,7 @@ module picorv32 #(
 		if (decoder_trigger && !decoder_pseudo_trigger) begin
 			pcpi_insn <= WITH_PCPI ? mem_rdata_q : 'bx;
 
+			// branch
 			instr_beq   <= is_beq_bne_blt_bge_bltu_bgeu && mem_rdata_q[14:12] == 3'b000;
 			instr_bne   <= is_beq_bne_blt_bge_bltu_bgeu && mem_rdata_q[14:12] == 3'b001;
 			instr_blt   <= is_beq_bne_blt_bge_bltu_bgeu && mem_rdata_q[14:12] == 3'b100;
@@ -1044,16 +1060,19 @@ module picorv32 #(
 			instr_bltu  <= is_beq_bne_blt_bge_bltu_bgeu && mem_rdata_q[14:12] == 3'b110;
 			instr_bgeu  <= is_beq_bne_blt_bge_bltu_bgeu && mem_rdata_q[14:12] == 3'b111;
 
+			// load
 			instr_lb    <= is_lb_lh_lw_lbu_lhu && mem_rdata_q[14:12] == 3'b000;
 			instr_lh    <= is_lb_lh_lw_lbu_lhu && mem_rdata_q[14:12] == 3'b001;
 			instr_lw    <= is_lb_lh_lw_lbu_lhu && mem_rdata_q[14:12] == 3'b010;
 			instr_lbu   <= is_lb_lh_lw_lbu_lhu && mem_rdata_q[14:12] == 3'b100;
 			instr_lhu   <= is_lb_lh_lw_lbu_lhu && mem_rdata_q[14:12] == 3'b101;
 
+			// store
 			instr_sb    <= is_sb_sh_sw && mem_rdata_q[14:12] == 3'b000;
 			instr_sh    <= is_sb_sh_sw && mem_rdata_q[14:12] == 3'b001;
 			instr_sw    <= is_sb_sh_sw && mem_rdata_q[14:12] == 3'b010;
 
+			// immediate computation
 			instr_addi  <= is_alu_reg_imm && mem_rdata_q[14:12] == 3'b000;
 			instr_slti  <= is_alu_reg_imm && mem_rdata_q[14:12] == 3'b010;
 			instr_sltiu <= is_alu_reg_imm && mem_rdata_q[14:12] == 3'b011;
@@ -1133,6 +1152,7 @@ module picorv32 #(
 			endcase
 		end
 
+		// reset
 		if (!resetn) begin
 			is_beq_bne_blt_bge_bltu_bgeu <= 0;
 			is_compare <= 0;
@@ -2809,7 +2829,7 @@ endmodule
 
 
 /***************************************************************
- * picorv32_wb
+ * picorv32_wb (Wishbone)
  ***************************************************************/
 
 module picorv32_wb #(

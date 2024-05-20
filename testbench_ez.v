@@ -15,10 +15,10 @@ module testbench;
 	always #5 clk = ~clk;
 
 	initial begin
-		if ($test$plusargs("vcd")) begin
-			$dumpfile("testbench.vcd");
-			$dumpvars(0, testbench);
-		end
+		// if ($test$plusargs("vcd")) begin
+		$dumpfile("testbench.vcd");
+		$dumpvars(0, testbench);
+		// end
 		repeat (100) @(posedge clk);
 		resetn <= 1;
 		repeat (1000) @(posedge clk);
